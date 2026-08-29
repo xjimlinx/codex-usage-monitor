@@ -1,0 +1,16 @@
+[Unit]
+Description=Codex account usage monitor
+Documentation=https://developers.openai.com/codex/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/codex-usage-monitor/environment
+ExecStart=/usr/bin/python3 %h/.local/lib/codex-usage-monitor/codex_usage_monitor.py --no-open --port 9000
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
