@@ -15,11 +15,75 @@ import time
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 APP_VERSION = "0.1.0"
 POLL_SECONDS = 30
+
+
+def proxy_config_path() -> Path:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "codex-usage-monitor" / "proxy.json"
+
+
+def validate_proxy_url(value: Any) -> str:
+    proxy_url = str(value or "").strip()
+    if not proxy_url:
+        return ""
+    if len(proxy_url) > 2048:
+        raise ValueError("代理地址过长")
+    parsed = urlsplit(proxy_url)
+    if parsed.scheme not in {"http", "https", "socks5"}:
+        raise ValueError("代理协议必须是 http、https 或 socks5")
+    if not parsed.hostname:
+        raise ValueError("代理地址缺少主机名")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("代理地址不能包含用户名或密码")
+    try:
+        parsed.port
+    except ValueError as error:
+        raise ValueError("代理端口无效") from error
+    return proxy_url
+
+
+def load_proxy_override() -> str | None:
+    path = proxy_config_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return validate_proxy_url(payload.get("proxyUrl")) or None
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def save_proxy_override(proxy_url: str) -> None:
+    path = proxy_config_path()
+    if not proxy_url:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_suffix(".json.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump({"proxyUrl": proxy_url}, stream, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def normalize_rate_limits_result(result: Any) -> dict[str, Any]:
@@ -124,8 +188,9 @@ refresh();
 
 
 class AppServerClient:
-    def __init__(self, command: str) -> None:
+    def __init__(self, command: str, proxy_override: str | None = None) -> None:
         self.command = command
+        self.proxy_override = proxy_override
         self.process: subprocess.Popen[str] | None = None
         self.pending: dict[int, queue.Queue[dict[str, Any]]] = {}
         self.lock = threading.Lock()
@@ -135,6 +200,13 @@ class AppServerClient:
         self.stopped = threading.Event()
 
     def start(self) -> None:
+        child_environment = os.environ.copy()
+        if self.proxy_override:
+            for variable in (
+                "http_proxy", "https_proxy", "all_proxy",
+                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+            ):
+                child_environment[variable] = self.proxy_override
         self.process = subprocess.Popen(
             [self.command, "app-server", "--stdio"],
             stdin=subprocess.PIPE,
@@ -143,6 +215,7 @@ class AppServerClient:
             text=True,
             encoding="utf-8",
             bufsize=1,
+            env=child_environment,
         )
         threading.Thread(target=self._read_stdout, daemon=True).start()
         threading.Thread(target=self._read_stderr, daemon=True).start()
@@ -253,7 +326,10 @@ class AppServerClient:
             self.process.terminate()
 
 
-def make_handler(client: AppServerClient) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    client: AppServerClient,
+    restart_callback: Any,
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def _headers(self, content_type: str, length: int | None = None) -> None:
             self.send_header("Content-Type", content_type)
@@ -278,6 +354,11 @@ def make_handler(client: AppServerClient) -> type[BaseHTTPRequestHandler]:
                 self.wfile.write(body)
             elif self.path == "/api/usage":
                 self._json(client.snapshot)
+            elif self.path == "/api/config":
+                self._json({
+                    "proxyUrl": load_proxy_override() or "",
+                    "usesEnvironmentProxy": load_proxy_override() is None,
+                })
             elif self.path == "/events":
                 self.send_response(HTTPStatus.OK)
                 self._headers("text/event-stream; charset=utf-8")
@@ -301,6 +382,23 @@ def make_handler(client: AppServerClient) -> type[BaseHTTPRequestHandler]:
                 self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:  # noqa: N802
+            if self.path == "/api/config":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 0 or length > 4096:
+                        raise ValueError("配置请求过大")
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    proxy_url = validate_proxy_url(payload.get("proxyUrl"))
+                    save_proxy_override(proxy_url)
+                except (ValueError, json.JSONDecodeError) as error:
+                    body = json.dumps({"error": str(error)}, ensure_ascii=False).encode()
+                    self.send_response(HTTPStatus.BAD_REQUEST)
+                    self._headers("application/json; charset=utf-8", len(body))
+                    self.wfile.write(body)
+                    return
+                self._json({"ok": True, "restarting": True})
+                restart_callback()
+                return
             if self.path != "/api/refresh":
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
@@ -323,7 +421,7 @@ def main() -> int:
     if not command or not os.path.isfile(command):
         parser.error(f"找不到 Codex CLI：{args.codex}")
 
-    client = AppServerClient(command)
+    client = AppServerClient(command, load_proxy_override())
     try:
         client.start()
     except Exception as error:
@@ -331,7 +429,27 @@ def main() -> int:
         print(f"启动失败：{error}", file=sys.stderr)
         return 1
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(client))
+    restart_lock = threading.Lock()
+    restart_started = False
+
+    def restart_self() -> None:
+        nonlocal restart_started
+        with restart_lock:
+            if restart_started:
+                return
+            restart_started = True
+
+        def perform_restart() -> None:
+            time.sleep(0.3)
+            client.stop()
+            executable = os.path.abspath(__file__)
+            os.execv(sys.executable, [sys.executable, executable, *sys.argv[1:]])
+
+        threading.Thread(target=perform_restart, daemon=True).start()
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port), make_handler(client, restart_self)
+    )
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"Codex 用量监视器：{url}")
     print("按 Ctrl+C 退出")

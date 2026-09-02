@@ -11,6 +11,7 @@
 - Plasma 任务栏中显示主要限额窗口的剩余百分比
 - 点击展开全部限额窗口、Credits、重置次数和重置时间
 - 右键配置 5–3600 秒的界面刷新间隔
+- 在配置页设置后端使用的 HTTP、HTTPS 或 SOCKS5 代理
 - 监听 `account/rateLimits/updated`，并以 30 秒后端轮询兜底
 - 短暂网络或代理故障时保留上一次成功数据，不让面板状态来回闪烁
 - systemd 用户服务登录自启、失败自动重启
@@ -52,6 +53,7 @@ python3 codex_usage_monitor.py --codex /path/to/codex --port 9000
 - 左键任务栏组件：展开用量详情
 - 展开页面右上角：立即刷新
 - 右键组件 →“配置 Codex 用量…”：设置界面刷新间隔
+- 配置页“代理地址”：保存后后端自动重新连接；留空则使用 systemd 服务环境
 
 服务管理：
 
@@ -83,6 +85,8 @@ KDE Plasmoid
 - 不提供消费 rate-limit reset credit 的操作
 - HTTP 服务仅监听 `127.0.0.1`
 - systemd 环境文件权限为 `0600`，并被 `.gitignore` 排除
+- 自定义代理保存在本机 `~/.config/codex-usage-monitor/proxy.json`，权限为 `0600`
+- 为避免凭据泄漏，代理 URL 不允许包含用户名或密码
 
 用量数据仍由本机 Codex CLI 使用其已有登录状态获取。请不要把个人配置目录、环境文件、
 日志或 Codex 登录文件提交到仓库。

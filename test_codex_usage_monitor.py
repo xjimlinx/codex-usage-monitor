@@ -55,6 +55,22 @@ class UsageMonitorTests(unittest.TestCase):
         self.assertTrue(client.snapshot["stale"])
         self.assertEqual(client.snapshot["warning"], "proxy down")
 
+    def test_proxy_validation_accepts_supported_urls(self):
+        self.assertEqual(
+            MODULE.validate_proxy_url(" http://127.0.0.1:7890 "),
+            "http://127.0.0.1:7890",
+        )
+        self.assertEqual(
+            MODULE.validate_proxy_url("socks5://localhost:1080"),
+            "socks5://localhost:1080",
+        )
+
+    def test_proxy_validation_rejects_credentials_and_unknown_protocols(self):
+        with self.assertRaisesRegex(ValueError, "用户名或密码"):
+            MODULE.validate_proxy_url("http://user:secret@localhost:8080")
+        with self.assertRaisesRegex(ValueError, "代理协议"):
+            MODULE.validate_proxy_url("ftp://localhost:21")
+
 
 if __name__ == "__main__":
     unittest.main()

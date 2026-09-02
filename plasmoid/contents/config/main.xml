@@ -11,5 +11,9 @@
             <min>5</min>
             <max>3600</max>
         </entry>
+        <entry name="proxyUrl" type="String">
+            <label>Proxy URL used by the local Codex app-server</label>
+            <default></default>
+        </entry>
     </group>
 </kcfg>
