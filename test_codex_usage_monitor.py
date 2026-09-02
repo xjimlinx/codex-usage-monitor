@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import unittest.mock
 import unittest
 
 
@@ -42,6 +43,17 @@ class UsageMonitorTests(unittest.TestCase):
     def test_rejects_silent_empty_response(self):
         with self.assertRaisesRegex(RuntimeError, "缺少 rateLimits"):
             MODULE.normalize_rate_limits_result({"ok": True})
+
+    def test_refresh_keeps_last_successful_data_on_transient_failure(self):
+        client = MODULE.AppServerClient("codex")
+        previous = {"rateLimits": {"primary": {"usedPercent": 12}}}
+        client.snapshot = {"data": previous, "updatedAt": 100}
+        with unittest.mock.patch.object(client, "request", side_effect=RuntimeError("proxy down")):
+            client.refresh()
+        self.assertEqual(client.snapshot["data"], previous)
+        self.assertEqual(client.snapshot["updatedAt"], 100)
+        self.assertTrue(client.snapshot["stale"])
+        self.assertEqual(client.snapshot["warning"], "proxy down")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ PlasmoidItem {
     property var usageData: null
     property var buckets: []
     property string errorText: ""
+    property string warningText: ""
     property bool loading: true
     property date updatedAt: new Date(0)
     readonly property int refreshIntervalSeconds: Math.max(
@@ -24,6 +25,7 @@ PlasmoidItem {
     Plasmoid.icon: "codex-desktop"
     toolTipMainText: i18n("Codex 用量")
     toolTipSubText: errorText.length > 0 ? errorText
+                    : warningText.length > 0 ? i18n("暂时无法更新，显示上次成功数据")
                     : primaryRemaining >= 0 ? i18n("主要窗口剩余 %1%", primaryRemaining)
                     : i18n("正在读取…")
     preferredRepresentation: compactRepresentation
@@ -84,16 +86,18 @@ PlasmoidItem {
             }
             try {
                 var payload = JSON.parse(request.responseText)
-                if (payload.error)
+                if (payload.error && !payload.data)
                     throw new Error(payload.error)
                 if (!payload.data || !payload.data.rateLimits)
                     throw new Error(i18n("响应中没有用量数据"))
                 usageData = payload.data
                 rebuildBuckets(payload.data)
                 errorText = ""
+                warningText = payload.warning || payload.error || ""
                 updatedAt = new Date()
             } catch (error) {
                 errorText = error.message || String(error)
+                warningText = ""
             }
         }
         request.ontimeout = function() { loading = false; errorText = i18n("读取用量超时") }
@@ -167,6 +171,13 @@ PlasmoidItem {
                     visible: root.errorText.length > 0
                     text: root.errorText
                     color: Kirigami.Theme.negativeTextColor
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
+                }
+                PlasmaComponents3.Label {
+                    visible: root.warningText.length > 0
+                    text: i18n("暂时无法更新，正在显示上次成功数据")
+                    color: Kirigami.Theme.neutralTextColor
                     wrapMode: Text.Wrap
                     Layout.fillWidth: true
                 }

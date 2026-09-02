@@ -109,12 +109,12 @@ const resetAt = seconds => seconds ? new Date(seconds*1000).toLocaleString() : '
 const windowHtml = w => { if (!w) return ''; const used=Math.max(0,Math.min(100,w.usedPercent??0)), remain=100-used;
   const tone=remain<=10?'danger':remain<=30?'warn':''; return `<div class="window"><div class="row"><span>${esc(duration(w.windowDurationMins))}</span><strong>剩余 ${remain}%</strong></div><div class="bar"><i class="${tone}" style="width:${remain}%"></i></div><div class="row muted"><span>已用 ${used}%</span><span>重置：${esc(resetAt(w.resetsAt))}</span></div></div>`; };
 function render(payload){ const dot=document.querySelector('#dot'), status=document.querySelector('#status span');
-  if(payload.error){ dot.className=''; status.textContent='读取失败'; document.querySelector('#summary').innerHTML=`<div>状态<strong>不可用</strong></div>`; document.querySelector('#limits').innerHTML=`<div class="card error">${esc(payload.error)}</div>`; return; }
+  if(payload.error && !payload.data){ dot.className=''; status.textContent='读取失败'; document.querySelector('#summary').innerHTML=`<div>状态<strong>不可用</strong></div>`; document.querySelector('#limits').innerHTML=`<div class="card error">${esc(payload.error)}</div>`; return; }
   const result=payload.data; if(!result || !result.rateLimits){ render({error:'收到的用量数据结构无效，请重启监视器后重试'}); return; }
-  dot.className='live'; status.textContent='实时连接'; const base=result.rateLimits, credits=base.credits||{}, resets=result.rateLimitResetCredits;
+  const warning=payload.warning||payload.error||''; dot.className=warning?'':'live'; status.textContent=warning?'显示上次数据':'实时连接'; const base=result.rateLimits, credits=base.credits||{}, resets=result.rateLimitResetCredits;
   document.querySelector('#summary').innerHTML=`<div><span class="muted">套餐</span><strong>${esc(base.planType||'未知')}</strong></div><div><span class="muted">Credits 余额</span><strong>${credits.unlimited?'无限':esc(credits.balance??'—')}</strong></div><div><span class="muted">可用重置</span><strong>${esc(resets?.availableCount??'—')}</strong></div>`;
   const buckets=result.rateLimitsByLimitId&&Object.keys(result.rateLimitsByLimitId).length?result.rateLimitsByLimitId:{default:base};
-  document.querySelector('#limits').innerHTML=Object.entries(buckets).map(([id,item])=>`<article class="card"><h2><span>${esc(item.limitName||id)}</span><span class="muted">${esc(item.planType||'')}</span></h2>${windowHtml(item.primary)}${windowHtml(item.secondary)}${!item.primary&&!item.secondary?'<div class="muted">暂无窗口数据</div>':''}</article>`).join('');
+  document.querySelector('#limits').innerHTML=(warning?`<div class="card error">暂时无法更新，正在保留上次成功数据：${esc(warning)}</div>`:'')+Object.entries(buckets).map(([id,item])=>`<article class="card"><h2><span>${esc(item.limitName||id)}</span><span class="muted">${esc(item.planType||'')}</span></h2>${windowHtml(item.primary)}${windowHtml(item.secondary)}${!item.primary&&!item.secondary?'<div class="muted">暂无窗口数据</div>':''}</article>`).join('');
 }
 async function refresh(){ try{const r=await fetch('/api/usage',{cache:'no-store'});render(await r.json())}catch(e){render({error:e.message})} }
 document.querySelector('#refresh').onclick=()=>fetch('/api/refresh',{method:'POST'}).then(refresh);
@@ -191,7 +191,18 @@ class AppServerClient:
             )
             self._publish({"data": result, "updatedAt": int(time.time())})
         except Exception as error:
-            self._publish({"error": str(error), "updatedAt": int(time.time())})
+            now = int(time.time())
+            previous_data = self.snapshot.get("data")
+            if isinstance(previous_data, dict):
+                self._publish({
+                    "data": previous_data,
+                    "warning": str(error),
+                    "stale": True,
+                    "updatedAt": self.snapshot.get("updatedAt", now),
+                    "lastAttemptAt": now,
+                })
+            else:
+                self._publish({"error": str(error), "updatedAt": now})
 
     def _read_stdout(self) -> None:
         assert self.process is not None and self.process.stdout is not None

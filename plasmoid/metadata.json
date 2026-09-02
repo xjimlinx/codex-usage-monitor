@@ -11,7 +11,7 @@
         "License": "MIT",
         "Name": "Codex Usage",
         "Name[zh_CN]": "Codex 用量",
-        "Version": "0.2.2",
+        "Version": "0.2.3",
         "Website": "https://github.com/xjimlinx/codex-usage-monitor"
     },
     "X-Plasma-API-Minimum-Version": "6.0"
