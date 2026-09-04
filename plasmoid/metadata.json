@@ -6,12 +6,12 @@
         "Description": "Show Codex rate-limit usage in the Plasma panel",
         "Description[zh_CN]": "在 Plasma 面板中显示 Codex 用量限制",
         "EnabledByDefault": true,
-        "Icon": "codex-desktop",
+        "Icon": "chatgpt",
         "Id": "io.github.codexdesktoplinux.usagemonitor",
         "License": "MIT",
         "Name": "Codex Usage",
         "Name[zh_CN]": "Codex 用量",
-        "Version": "0.3.0",
+        "Version": "0.3.3",
         "Website": "https://github.com/xjimlinx/codex-usage-monitor"
     },
     "X-Plasma-API-Minimum-Version": "6.0"

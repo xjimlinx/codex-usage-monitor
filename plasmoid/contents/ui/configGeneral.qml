@@ -7,6 +7,10 @@ import org.kde.kirigami as Kirigami
 KCM.SimpleKCM {
     property alias cfg_refreshInterval: refreshInterval.value
     property int cfg_refreshIntervalDefault: 30
+    property alias cfg_compactHorizontalPadding: compactHorizontalPadding.value
+    property int cfg_compactHorizontalPaddingDefault: 8
+    property alias cfg_compactVerticalPadding: compactVerticalPadding.value
+    property int cfg_compactVerticalPaddingDefault: 4
     property alias cfg_proxyUrl: proxyAddress.text
     property string cfg_proxyUrlDefault: ""
     property string proxyStatus: ""
@@ -104,6 +108,38 @@ KCM.SimpleKCM {
             wrapMode: Text.Wrap
             Layout.fillWidth: true
             opacity: 0.7
+        }
+
+        Label {
+            Kirigami.FormData.isSection: true
+            text: i18n("任务栏布局")
+            font.bold: true
+        }
+
+        SpinBox {
+            id: compactHorizontalPadding
+            Kirigami.FormData.label: i18n("横向内边距：")
+            from: 0
+            to: 32
+            editable: true
+            textFromValue: function(value) { return i18n("%1 px", value) }
+            valueFromText: function(text) {
+                var parsed = parseInt(text, 10)
+                return isNaN(parsed) ? 8 : parsed
+            }
+        }
+
+        SpinBox {
+            id: compactVerticalPadding
+            Kirigami.FormData.label: i18n("纵向内边距：")
+            from: 0
+            to: 16
+            editable: true
+            textFromValue: function(value) { return i18n("%1 px", value) }
+            valueFromText: function(text) {
+                var parsed = parseInt(text, 10)
+                return isNaN(parsed) ? 4 : parsed
+            }
         }
 
         TextField {

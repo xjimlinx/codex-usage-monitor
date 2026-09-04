@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents3
+import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.plasmoid
 
 PlasmoidItem {
@@ -16,19 +17,34 @@ PlasmoidItem {
     readonly property int refreshIntervalSeconds: Math.max(
         5, Number(Plasmoid.configuration.refreshInterval) || 30
     )
+    readonly property int compactHorizontalPadding: Math.max(
+        0, Math.min(32, Number(Plasmoid.configuration.compactHorizontalPadding))
+    )
+    readonly property int compactVerticalPadding: Math.max(
+        0, Math.min(16, Number(Plasmoid.configuration.compactVerticalPadding))
+    )
     readonly property var primaryWindow: usageData && usageData.rateLimits
                                          ? usageData.rateLimits.primary : null
     readonly property int primaryRemaining: primaryWindow
                                             ? Math.max(0, 100 - primaryWindow.usedPercent) : -1
 
     Plasmoid.title: i18n("Codex 用量")
-    Plasmoid.icon: "codex-desktop"
+    Plasmoid.icon: "chatgpt"
     toolTipMainText: i18n("Codex 用量")
     toolTipSubText: errorText.length > 0 ? errorText
                     : warningText.length > 0 ? i18n("暂时无法更新，显示上次成功数据")
                     : primaryRemaining >= 0 ? i18n("主要窗口剩余 %1%", primaryRemaining)
                     : i18n("正在读取…")
     preferredRepresentation: compactRepresentation
+
+    Plasmoid.contextualActions: [
+        PlasmaCore.Action {
+            text: i18n("立即更新")
+            icon.name: "view-refresh"
+            enabled: !root.loading
+            onTriggered: root.refresh()
+        }
+    ]
 
     function durationText(minutes) {
         if (minutes === null || minutes === undefined)
@@ -114,8 +130,12 @@ PlasmoidItem {
     }
 
     compactRepresentation: MouseArea {
-        implicitWidth: compactRow.implicitWidth + Kirigami.Units.smallSpacing * 2
-        implicitHeight: Kirigami.Units.gridUnit
+        implicitWidth: compactRow.implicitWidth + root.compactHorizontalPadding * 2
+        implicitHeight: compactRow.implicitHeight + root.compactVerticalPadding * 2
+        Layout.minimumWidth: implicitWidth
+        Layout.preferredWidth: implicitWidth
+        Layout.minimumHeight: implicitHeight
+        Layout.preferredHeight: implicitHeight
         onClicked: root.expanded = !root.expanded
 
         RowLayout {
@@ -123,7 +143,7 @@ PlasmoidItem {
             anchors.centerIn: parent
             spacing: Kirigami.Units.smallSpacing
             Kirigami.Icon {
-                source: "codex-desktop"
+                source: "chatgpt"
                 implicitWidth: Kirigami.Units.iconSizes.smallMedium
                 implicitHeight: implicitWidth
             }
