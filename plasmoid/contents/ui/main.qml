@@ -29,7 +29,7 @@ PlasmoidItem {
                                             ? Math.max(0, 100 - primaryWindow.usedPercent) : -1
 
     Plasmoid.title: i18n("Codex 用量")
-    Plasmoid.icon: "chatgpt"
+    Plasmoid.icon: "io.github.codexdesktoplinux.usagemonitor"
     toolTipMainText: i18n("Codex 用量")
     toolTipSubText: errorText.length > 0 ? errorText
                     : warningText.length > 0 ? i18n("暂时无法更新，显示上次成功数据")
@@ -143,7 +143,7 @@ PlasmoidItem {
             anchors.centerIn: parent
             spacing: Kirigami.Units.smallSpacing
             Kirigami.Icon {
-                source: "chatgpt"
+                source: "io.github.codexdesktoplinux.usagemonitor"
                 implicitWidth: Kirigami.Units.iconSizes.smallMedium
                 implicitHeight: implicitWidth
             }
