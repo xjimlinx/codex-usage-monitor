@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,8 +21,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.4.0"
 POLL_SECONDS = 30
+AUTO_RECONNECT_MARKER = "CODEX_USAGE_MONITOR_AUTO_RECONNECTED"
 
 
 def proxy_config_path() -> Path:
@@ -127,6 +129,22 @@ def normalize_rate_limits_result(result: Any) -> dict[str, Any]:
     }
     return {"rateLimits": snapshot, "rateLimitsByLimitId": {"codex": snapshot}}
 
+
+def normalize_account_result(result: Any) -> dict[str, Any] | None:
+    """Expose only display-safe account fields from account/read."""
+    if not isinstance(result, dict):
+        raise RuntimeError("app-server 返回了无效的账号响应")
+    account = result.get("account")
+    if account is None:
+        return None
+    if not isinstance(account, dict):
+        raise RuntimeError("app-server 返回了无效的账号信息")
+    return {
+        "type": account.get("type") if isinstance(account.get("type"), str) else "",
+        "email": account.get("email") if isinstance(account.get("email"), str) else None,
+        "planType": account.get("planType") if isinstance(account.get("planType"), str) else None,
+    }
+
 INDEX_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -164,15 +182,20 @@ INDEX_HTML = r"""<!doctype html>
   <header><div><h1>Codex 用量</h1><div class="muted">来自本机 Codex app-server</div></div>
     <div><button id="refresh">立即刷新</button> <span id="status"><i id="dot"></i><span>连接中</span></span></div>
   </header>
+  <section id="account" class="card" style="margin-bottom:16px"></section>
   <section id="summary" class="summary"></section><section id="limits"></section>
 </main>
 <script>
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let activeSessionId='';
 const duration = mins => mins == null ? '用量窗口' : mins >= 1440 ? `${Math.ceil(mins/1440)} 天窗口` : mins >= 60 ? `${Math.ceil(mins/60)} 小时窗口` : `${mins} 分钟窗口`;
 const resetAt = seconds => seconds ? new Date(seconds*1000).toLocaleString() : '未知';
 const windowHtml = w => { if (!w) return ''; const used=Math.max(0,Math.min(100,w.usedPercent??0)), remain=100-used;
   const tone=remain<=10?'danger':remain<=30?'warn':''; return `<div class="window"><div class="row"><span>${esc(duration(w.windowDurationMins))}</span><strong>剩余 ${remain}%</strong></div><div class="bar"><i class="${tone}" style="width:${remain}%"></i></div><div class="row muted"><span>已用 ${used}%</span><span>重置：${esc(resetAt(w.resetsAt))}</span></div></div>`; };
-function render(payload){ const dot=document.querySelector('#dot'), status=document.querySelector('#status span');
+function render(payload){ const dot=document.querySelector('#dot'), status=document.querySelector('#status span'), account=payload.account;
+  if(payload.data && payload.sessionId) activeSessionId=payload.sessionId;
+  const accountType=account?.type==='chatgpt'?'ChatGPT':account?.type==='apiKey'?'API Key':account?.type==='amazonBedrock'?'Amazon Bedrock':account?.type||'未知';
+  document.querySelector('#account').innerHTML=`<div class="muted">当前账号</div><strong>${esc(account?.email||'账号信息不可用')}</strong><div class="muted">${esc(accountType)} · ${esc(account?.planType||'套餐未知')}</div>`;
   if(payload.error && !payload.data){ dot.className=''; status.textContent='读取失败'; document.querySelector('#summary').innerHTML=`<div>状态<strong>不可用</strong></div>`; document.querySelector('#limits').innerHTML=`<div class="card error">${esc(payload.error)}</div>`; return; }
   const result=payload.data; if(!result || !result.rateLimits){ render({error:'收到的用量数据结构无效，请重启监视器后重试'}); return; }
   const warning=payload.warning||payload.error||''; dot.className=warning?'':'live'; status.textContent=warning?'显示上次数据':'实时连接'; const base=result.rateLimits, credits=base.credits||{}, resets=result.rateLimitResetCredits;
@@ -181,7 +204,14 @@ function render(payload){ const dot=document.querySelector('#dot'), status=docum
   document.querySelector('#limits').innerHTML=(warning?`<div class="card error">暂时无法更新，正在保留上次成功数据：${esc(warning)}</div>`:'')+Object.entries(buckets).map(([id,item])=>`<article class="card"><h2><span>${esc(item.limitName||id)}</span><span class="muted">${esc(item.planType||'')}</span></h2>${windowHtml(item.primary)}${windowHtml(item.secondary)}${!item.primary&&!item.secondary?'<div class="muted">暂无窗口数据</div>':''}</article>`).join('');
 }
 async function refresh(){ try{const r=await fetch('/api/usage',{cache:'no-store'});render(await r.json())}catch(e){render({error:e.message})} }
-document.querySelector('#refresh').onclick=()=>fetch('/api/refresh',{method:'POST'}).then(refresh);
+document.querySelector('#refresh').onclick=async()=>{ const previousSession=activeSessionId;
+  try{await fetch('/api/refresh',{method:'POST'});
+    for(let attempt=0;attempt<20;attempt++){await new Promise(resolve=>setTimeout(resolve,1200));
+      try{const payload=await (await fetch('/api/usage',{cache:'no-store'})).json();
+        if(payload.sessionId && payload.sessionId!==previousSession && payload.data){render(payload);return;}
+      }catch(e){} }
+    render({error:'重新连接用量服务超时'});
+  }catch(e){render({error:e.message})} };
 const events=new EventSource('/events'); events.onmessage=e=>render(JSON.parse(e.data)); events.onerror=()=>{document.querySelector('#dot').className='';document.querySelector('#status span').textContent='正在重连'};
 refresh();
 </script></body></html>"""
@@ -194,10 +224,13 @@ class AppServerClient:
         self.process: subprocess.Popen[str] | None = None
         self.pending: dict[int, queue.Queue[dict[str, Any]]] = {}
         self.lock = threading.Lock()
+        self.refresh_lock = threading.Lock()
         self.next_id = 1
         self.snapshot: dict[str, Any] = {"error": "正在连接 Codex app-server"}
+        self.session_id = uuid.uuid4().hex
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.stopped = threading.Event()
+        self.auto_reconnect: Any = None
 
     def start(self) -> None:
         child_environment = os.environ.copy()
@@ -234,7 +267,7 @@ class AppServerClient:
             self.process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
             self.process.stdin.flush()
 
-    def request(self, method: str, params: dict[str, Any], timeout: float = 15) -> Any:
+    def request(self, method: str, params: dict[str, Any] | None, timeout: float = 15) -> Any:
         with self.lock:
             request_id = self.next_id
             self.next_id += 1
@@ -258,24 +291,41 @@ class AppServerClient:
         self._write({"method": method, "params": params})
 
     def refresh(self) -> None:
-        try:
-            result = normalize_rate_limits_result(
-                self.request("account/rateLimits/read", {})
-            )
-            self._publish({"data": result, "updatedAt": int(time.time())})
-        except Exception as error:
-            now = int(time.time())
-            previous_data = self.snapshot.get("data")
-            if isinstance(previous_data, dict):
+        with self.refresh_lock:
+            try:
+                account = normalize_account_result(
+                    self.request("account/read", {"refreshToken": False})
+                )
+            except Exception:
+                account = None
+            try:
+                result = normalize_rate_limits_result(
+                    self.request("account/rateLimits/read", None)
+                )
                 self._publish({
-                    "data": previous_data,
-                    "warning": str(error),
-                    "stale": True,
-                    "updatedAt": self.snapshot.get("updatedAt", now),
-                    "lastAttemptAt": now,
+                    "account": account, "data": result, "updatedAt": int(time.time())
                 })
-            else:
-                self._publish({"error": str(error), "updatedAt": now})
+                os.environ.pop(AUTO_RECONNECT_MARKER, None)
+            except Exception as error:
+                now = int(time.time())
+                message = str(error)
+                previous_data = self.snapshot.get("data")
+                same_account = account is not None and account == self.snapshot.get("account")
+                revoked = "token_revoked" in message
+                if isinstance(previous_data, dict) and same_account and not revoked:
+                    self._publish({
+                        "account": account,
+                        "data": previous_data,
+                        "warning": message,
+                        "stale": True,
+                        "updatedAt": self.snapshot.get("updatedAt", now),
+                        "lastAttemptAt": now,
+                    })
+                else:
+                    self._publish({"account": None if revoked else account,
+                                   "error": message, "updatedAt": now})
+                if revoked and self.auto_reconnect is not None:
+                    self.auto_reconnect()
 
     def _read_stdout(self) -> None:
         assert self.process is not None and self.process.stdout is not None
@@ -290,7 +340,7 @@ class AppServerClient:
                     response_queue = self.pending.get(request_id)
                 if response_queue is not None:
                     response_queue.put(message)
-            elif message.get("method") == "account/rateLimits/updated":
+            elif message.get("method") in {"account/rateLimits/updated", "account/updated"}:
                 threading.Thread(target=self.refresh, daemon=True).start()
         if not self.stopped.is_set():
             self._publish({"error": "Codex app-server 已退出", "updatedAt": int(time.time())})
@@ -305,6 +355,7 @@ class AppServerClient:
             self.refresh()
 
     def _publish(self, payload: dict[str, Any]) -> None:
+        payload["sessionId"] = self.session_id
         self.snapshot = payload
         for subscriber in list(self.subscribers):
             try:
@@ -402,8 +453,8 @@ def make_handler(
             if self.path != "/api/refresh":
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            threading.Thread(target=client.refresh, daemon=True).start()
-            self._json({"ok": True})
+            self._json({"ok": True, "restarting": True})
+            restart_callback()
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -432,12 +483,18 @@ def main() -> int:
     restart_lock = threading.Lock()
     restart_started = False
 
-    def restart_self() -> None:
+    def restart_self(auto: bool = False) -> None:
         nonlocal restart_started
         with restart_lock:
             if restart_started:
                 return
+            if auto and os.environ.get(AUTO_RECONNECT_MARKER) == "1":
+                return
             restart_started = True
+            if auto:
+                os.environ[AUTO_RECONNECT_MARKER] = "1"
+            else:
+                os.environ.pop(AUTO_RECONNECT_MARKER, None)
 
         def perform_restart() -> None:
             time.sleep(0.3)
@@ -446,6 +503,8 @@ def main() -> int:
             os.execv(sys.executable, [sys.executable, executable, *sys.argv[1:]])
 
         threading.Thread(target=perform_restart, daemon=True).start()
+
+    client.auto_reconnect = lambda: restart_self(auto=True)
 
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port), make_handler(client, restart_self)

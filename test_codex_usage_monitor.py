@@ -1,5 +1,7 @@
 import importlib.util
+import http.client
 import pathlib
+import threading
 import unittest.mock
 import unittest
 
@@ -17,12 +19,27 @@ class UsageMonitorTests(unittest.TestCase):
         self.assertIn("usedPercent", page)
         self.assertIn("rateLimitsByLimitId", page)
         self.assertIn("Credits 余额", page)
+        self.assertIn("当前账号", page)
         self.assertIn("const esc =", page)
 
     def test_server_uses_read_only_rate_limit_method(self):
         source = MODULE_PATH.read_text(encoding="utf-8")
-        self.assertIn('self.request("account/rateLimits/read", {})', source)
+        self.assertIn('self.request("account/rateLimits/read", None)', source)
+        self.assertIn('self.request("account/read", {"refreshToken": False})', source)
         self.assertNotIn('request("account/rateLimitResetCredit/consume"', source)
+
+    def test_account_response_exposes_only_display_fields(self):
+        account = MODULE.normalize_account_result({
+            "account": {
+                "type": "chatgpt", "email": "user@example.com",
+                "planType": "plus", "accessToken": "secret", "accountId": "hidden",
+            },
+            "requiresOpenaiAuth": True,
+        })
+        self.assertEqual(account, {
+            "type": "chatgpt", "email": "user@example.com", "planType": "plus",
+        })
+        self.assertIsNone(MODULE.normalize_account_result({"account": None}))
 
     def test_normalizes_raw_rate_limit_response(self):
         result = MODULE.normalize_rate_limits_result({
@@ -46,14 +63,71 @@ class UsageMonitorTests(unittest.TestCase):
 
     def test_refresh_keeps_last_successful_data_on_transient_failure(self):
         client = MODULE.AppServerClient("codex")
+        account = {"type": "chatgpt", "email": "user@example.com", "planType": "plus"}
         previous = {"rateLimits": {"primary": {"usedPercent": 12}}}
-        client.snapshot = {"data": previous, "updatedAt": 100}
-        with unittest.mock.patch.object(client, "request", side_effect=RuntimeError("proxy down")):
+        client.snapshot = {"account": account, "data": previous, "updatedAt": 100}
+        with unittest.mock.patch.object(client, "request", side_effect=[
+            {"account": account}, RuntimeError("proxy down")
+        ]):
             client.refresh()
         self.assertEqual(client.snapshot["data"], previous)
         self.assertEqual(client.snapshot["updatedAt"], 100)
         self.assertTrue(client.snapshot["stale"])
         self.assertEqual(client.snapshot["warning"], "proxy down")
+
+    def test_changed_account_does_not_keep_previous_usage(self):
+        client = MODULE.AppServerClient("codex")
+        client.snapshot = {
+            "account": {"type": "chatgpt", "email": "old@example.com", "planType": "free"},
+            "data": {"rateLimits": {"primary": {"usedPercent": 12}}},
+            "updatedAt": 100,
+        }
+        with unittest.mock.patch.object(client, "request", side_effect=[
+            {"account": {"type": "chatgpt", "email": "new@example.com", "planType": "plus"}},
+            RuntimeError("proxy down"),
+        ]):
+            client.refresh()
+        self.assertNotIn("data", client.snapshot)
+        self.assertEqual(client.snapshot["account"]["email"], "new@example.com")
+
+    def test_revoked_token_clears_old_account_and_requests_reconnect(self):
+        client = MODULE.AppServerClient("codex")
+        client.snapshot = {
+            "account": {"type": "chatgpt", "email": "old@example.com", "planType": "free"},
+            "data": {"rateLimits": {"primary": {"usedPercent": 12}}},
+            "updatedAt": 100,
+        }
+        reconnect = unittest.mock.Mock()
+        client.auto_reconnect = reconnect
+        with unittest.mock.patch.object(client, "request", side_effect=[
+            {"account": {"type": "chatgpt", "email": "old@example.com", "planType": "free"}},
+            RuntimeError("401 Unauthorized: token_revoked"),
+        ]):
+            client.refresh()
+        self.assertNotIn("data", client.snapshot)
+        self.assertIsNone(client.snapshot["account"])
+        reconnect.assert_called_once_with()
+
+    def test_manual_refresh_requests_backend_reconnect(self):
+        client = MODULE.AppServerClient("codex")
+        reconnect = unittest.mock.Mock()
+        server = MODULE.ThreadingHTTPServer(
+            ("127.0.0.1", 0), MODULE.make_handler(client, reconnect)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+            connection.request("POST", "/api/refresh")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn(b'"restarting": true', response.read())
+            connection.close()
+            reconnect.assert_called_once_with()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_proxy_validation_accepts_supported_urls(self):
         self.assertEqual(

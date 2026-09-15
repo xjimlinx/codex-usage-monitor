@@ -9,10 +9,14 @@ PlasmoidItem {
     id: root
 
     property var usageData: null
+    property var accountData: null
     property var buckets: []
+    property string sessionId: ""
     property string errorText: ""
     property string warningText: ""
     property bool loading: true
+    property bool reconnecting: false
+    property int reconnectAttempts: 0
     property date updatedAt: new Date(0)
     readonly property int refreshIntervalSeconds: Math.max(
         5, Number(Plasmoid.configuration.refreshInterval) || 30
@@ -31,7 +35,8 @@ PlasmoidItem {
     Plasmoid.title: i18n("Codex 用量")
     Plasmoid.icon: "io.github.codexdesktoplinux.usagemonitor"
     toolTipMainText: i18n("Codex 用量")
-    toolTipSubText: errorText.length > 0 ? errorText
+    toolTipSubText: reconnecting ? i18n("正在重新连接当前账号…")
+                    : errorText.length > 0 ? errorText
                     : warningText.length > 0 ? i18n("暂时无法更新，显示上次成功数据")
                     : primaryRemaining >= 0 ? i18n("主要窗口剩余 %1%", primaryRemaining)
                     : i18n("正在读取…")
@@ -41,8 +46,8 @@ PlasmoidItem {
         PlasmaCore.Action {
             text: i18n("立即更新")
             icon.name: "view-refresh"
-            enabled: !root.loading
-            onTriggered: root.refresh()
+            enabled: !root.reconnecting
+            onTriggered: root.forceRefresh()
         }
     ]
 
@@ -87,6 +92,49 @@ PlasmoidItem {
         buckets = values
     }
 
+    function accountTypeText(type) {
+        if (type === "chatgpt") return i18n("ChatGPT 登录")
+        if (type === "apiKey") return i18n("API Key 登录")
+        if (type === "amazonBedrock") return i18n("Amazon Bedrock")
+        return i18n("登录方式未知")
+    }
+
+    function forceRefresh() {
+        reconnecting = true
+        reconnectAttempts = 0
+        loading = true
+        accountData = null
+        usageData = null
+        buckets = []
+        errorText = ""
+        warningText = ""
+        var request = new XMLHttpRequest()
+        request.open("POST", "http://127.0.0.1:9000/api/refresh")
+        request.timeout = 5000
+        request.onreadystatechange = function() {
+            if (request.readyState !== XMLHttpRequest.DONE)
+                return
+            if (request.status === 200) {
+                reconnectTimer.start()
+            } else {
+                reconnecting = false
+                loading = false
+                errorText = i18n("无法请求重新连接用量服务")
+            }
+        }
+        request.ontimeout = function() {
+            reconnecting = false
+            loading = false
+            errorText = i18n("重新连接请求超时")
+        }
+        request.onerror = function() {
+            reconnecting = false
+            loading = false
+            errorText = i18n("无法连接本地用量服务")
+        }
+        request.send()
+    }
+
     function refresh() {
         loading = true
         var request = new XMLHttpRequest()
@@ -97,11 +145,15 @@ PlasmoidItem {
                 return
             loading = false
             if (request.status !== 200) {
+                if (root.reconnecting) return
                 errorText = i18n("用量服务不可用（HTTP %1）", request.status)
                 return
             }
             try {
                 var payload = JSON.parse(request.responseText)
+                if (root.reconnecting && (!payload.sessionId || payload.sessionId === root.sessionId))
+                    return
+                accountData = payload.account || null
                 if (payload.error && !payload.data)
                     throw new Error(payload.error)
                 if (!payload.data || !payload.data.rateLimits)
@@ -110,15 +162,37 @@ PlasmoidItem {
                 rebuildBuckets(payload.data)
                 errorText = ""
                 warningText = payload.warning || payload.error || ""
-                updatedAt = new Date()
+                updatedAt = payload.updatedAt ? new Date(payload.updatedAt * 1000) : new Date()
+                sessionId = payload.sessionId || ""
+                reconnecting = false
+                reconnectTimer.stop()
             } catch (error) {
+                usageData = null
+                buckets = []
                 errorText = error.message || String(error)
                 warningText = ""
             }
         }
-        request.ontimeout = function() { loading = false; errorText = i18n("读取用量超时") }
-        request.onerror = function() { loading = false; errorText = i18n("无法连接本地用量服务") }
+        request.ontimeout = function() { loading = false; if (!root.reconnecting) errorText = i18n("读取用量超时") }
+        request.onerror = function() { loading = false; if (!root.reconnecting) errorText = i18n("无法连接本地用量服务") }
         request.send()
+    }
+
+    Timer {
+        id: reconnectTimer
+        interval: 1200
+        repeat: true
+        onTriggered: {
+            if (++root.reconnectAttempts > 20) {
+                stop()
+                root.reconnecting = false
+                root.loading = false
+                if (!root.errorText.length)
+                    root.errorText = i18n("重新连接用量服务超时")
+            } else {
+                root.refresh()
+            }
+        }
     }
 
     Timer {
@@ -181,10 +255,45 @@ PlasmoidItem {
                     }
                     PlasmaComponents3.ToolButton {
                         icon.name: "view-refresh"
-                        enabled: !root.loading
-                        onClicked: root.refresh()
-                        PlasmaComponents3.ToolTip.text: i18n("立即刷新")
+                        enabled: !root.reconnecting
+                        onClicked: root.forceRefresh()
+                        PlasmaComponents3.ToolTip.text: i18n("重新连接并刷新当前账号")
                         PlasmaComponents3.ToolTip.visible: hovered
+                    }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: accountColumn.implicitHeight + Kirigami.Units.largeSpacing * 2
+                    radius: Kirigami.Units.smallSpacing
+                    color: Kirigami.Theme.alternateBackgroundColor
+                    ColumnLayout {
+                        id: accountColumn
+                        anchors.fill: parent
+                        anchors.margins: Kirigami.Units.largeSpacing
+                        spacing: Kirigami.Units.smallSpacing
+                        PlasmaComponents3.Label {
+                            text: i18n("当前账号")
+                            opacity: 0.65
+                        }
+                        PlasmaComponents3.Label {
+                            Layout.fillWidth: true
+                            text: root.reconnecting ? i18n("正在重新连接…")
+                                  : root.accountData && root.accountData.email
+                                  ? root.accountData.email
+                                  : root.accountData ? root.accountTypeText(root.accountData.type)
+                                  : i18n("账号信息不可用")
+                            font.bold: true
+                            wrapMode: Text.WrapAnywhere
+                        }
+                        PlasmaComponents3.Label {
+                            Layout.fillWidth: true
+                            text: root.accountData
+                                  ? i18n("%1 · 套餐：%2", root.accountTypeText(root.accountData.type),
+                                         root.accountData.planType || "—")
+                                  : i18n("登录方式与套餐暂不可用")
+                            opacity: 0.65
+                            wrapMode: Text.Wrap
+                        }
                     }
                 }
                 PlasmaComponents3.Label {
